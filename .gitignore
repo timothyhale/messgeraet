@@ -1,0 +1,23 @@
+# Ignore all files
+*
+
+# But do not ignore these file patterns:
+!*.md
+!*.markdown
+!*.py
+
+# Common image extensions
+!*.png
+!*.jpg
+!*.jpeg
+!*.gif
+!*.bmp
+!*.svg
+!*.ico
+!*.webp
+
+# Always keep the .gitignore itself
+!.gitignore
+
+# Allow Git to recurse into directories (so it can find allowed files)
+!*/
