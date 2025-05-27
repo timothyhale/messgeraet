@@ -14,3 +14,4 @@
 - Set Reference by Classifying Circle with 2Euro or 50Cent...
 - Detect Regions of Objeckt that is being measured
 - Create Bounding box
+- Output Bounding Box dimensions
