@@ -1,10 +1,10 @@
 import argparse
-from skimage import io, draw, feature, transform
-
 import numpy as np
 import cv2
-from skimage.util import img_as_ubyte
+import os
 
+from skimage import io, draw, feature, transform
+from skimage.util import img_as_ubyte
 from dataclasses import dataclass
 
 @dataclass
@@ -12,7 +12,7 @@ class Settings:
     threshold: int
     image_path: str
     output_step: str
-    reference_object: int
+    # reference_object: int
 
 def log(msg):
     print("Debug: " + msg)
@@ -40,20 +40,20 @@ def parse_args() -> Settings:
         default="last",
         help="Pipeline step for which to save the output image (default: last)"
     )
-    parser.add_argument(
-        "--reference-object", "-r",
-        type=int,
-        choices=[2, 1, 50],
-        required=True,
-        help="Reference object for scale (2€, 1€ or 50 cent)"
-    )
+    # parser.add_argument(
+    #     "--reference-object", "-r",
+    #     type=int,
+    #     choices=[2, 1, 50],
+    #     required=True,
+    #     help="Reference object for scale (2€, 1€ or 50 cent)"
+    # )
 
     args = parser.parse_args()
     return Settings(
         threshold=args.threshold,
         image_path=args.image_path,
         output_step=args.output_step,
-        reference_object=args.reference_object
+        # reference_object=args.reference_object
     )
 
 def save_current_pipeline_state(image, image_name):
@@ -154,16 +154,99 @@ def intersection_ratio_contour_in_circle(binary_shape, contour):
 
     ratio = intersection_pixels / circle_pixels
     return ratio
+
+# def detect_hough_circles(gray_image, min_radius=30, max_radius=300, min_circle_ratio=0.85):
+#     gray_blurred = cv2.GaussianBlur(gray_image, (9, 9), 2)
+
+#     # Hough-Transformation anwenden (auf Graustufenbild!)
+#     circles = cv2.HoughCircles(
+#         gray_blurred,
+#         cv2.HOUGH_GRADIENT,
+#         dp=1.2,
+#         minDist=30,
+#         param1=100,
+#         param2=18,             # ↓ lower to catch weaker large-circle edges
+#         minRadius=min_radius,
+#         maxRadius=max_radius
+#     )
+
+#     filtered_circles = []
+
+#     if circles is not None:
+#         circles = np.round(circles[0, :]).astype("int")
+
+#         for (x, y, r) in circles:
+#             # Maske für den erkannten Kreis erstellen
+#             mask = np.zeros_like(gray_image, dtype=np.uint8)
+#             cv2.circle(mask, (x, y), r, 255, -1)
+
+#             # Kontur aus Maske extrahieren
+#             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#             if not contours:
+#                 continue
+
+#             contour = contours[0]
+#             area_contour = cv2.contourArea(contour)
+#             area_circle = np.pi * (r ** 2)
+#             ratio = area_contour / area_circle if area_circle > 0 else 0
+
+#             if ratio >= min_circle_ratio:
+#                 filtered_circles.append((x, y, r, ratio))
+
+#     # Optional: nach ratio sortieren
+#     filtered_circles.sort(key=lambda c: (c[3], c[2]), reverse=True)
+
+#     return filtered_circles[0]
+
+
+def auto_otsu_threshold(roi):
+    # Estimate if background is brighter or darker than foreground
+    mean_val = np.mean(roi)
+
+    # If background is bright (e.g. white), we invert
+    if mean_val > 127:
+        thresh_type = cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    else:
+        thresh_type = cv2.THRESH_BINARY + cv2.THRESH_OTSU
+
+    _, binary = cv2.threshold(roi, 0, 255, thresh_type)
+    return binary
                                      
 
-def detect_circle_with_contours(binary_image, connected_components, min_circle_ratio=-np.inf):
+def detect_circle(gray, connected_components, min_circle_ratio=-np.inf):
     best_circle = None
-    hulls = []
-    rotated_rects = []
     best_ratio = 0
-    output_img = cv2.cvtColor((binary_image * 255).astype('uint8'), cv2.COLOR_GRAY2BGR)
 
-    for component in connected_components:
+    for i, component in enumerate(connected_components):
+        x, y, w, h, _ = component
+        roi = gray[y:y+h, x:x+w]
+        binary_roi = auto_otsu_threshold(roi)
+        contours, _ = cv2.findContours(binary_roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            continue
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
+        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+        approx += np.array([[x, y]])
+
+        (bcx, bcy), radius = cv2.minEnclosingCircle(approx)
+        circle_ratio = intersection_ratio_contour_in_circle(gray.shape, approx)
+
+        if circle_ratio > min_circle_ratio and circle_ratio > best_ratio:
+            best_ratio = circle_ratio
+            best_circle = bcx, bcy, radius
+            cv2.imshow("Circle ROI", extract_circular_roi(gray, bcx, bcy, radius))
+
+    return best_circle
+
+def detect_rects(binary_image, connected_components, min_circle_ratio=-np.inf, ignore_index=-1):
+    rects = []
+
+    for i, component in enumerate(connected_components):
+        if i == ignore_index:
+            continue
         x, y, w, h, _ = component
         roi = binary_image[y:y+h, x:x+w]
         contours, _ = cv2.findContours(roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -171,30 +254,16 @@ def detect_circle_with_contours(binary_image, connected_components, min_circle_r
         if not contours:
             continue
 
+
         largest_contour = max(contours, key=cv2.contourArea)
-        largest_contour += np.array([[x, y]])
-        hull = cv2.convexHull(largest_contour)
-        hulls.append(hull)
+        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
+        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+        approx += np.array([[x, y]])
 
-        (bcx, bcy), radius = cv2.minEnclosingCircle(largest_contour)
-        rotated_rects.append(cv2.minAreaRect(largest_contour))
-        circle_ratio = intersection_ratio_contour_in_circle(binary_image.shape, largest_contour)
+        rects.append(cv2.minAreaRect(approx))
 
-        # cv2.drawContours(output_img, [largest_contour], -1, (0, 255, 0), thickness=-1)
-        print(f"Radius: {radius:.2f}, Center: ({bcx:.1f}, {bcy:.1f}), Circle Ratio: {circle_ratio:.3f}")
-        # cv2.circle(output_img, (int(bcx), int(bcy)), int(radius), (255, 0, 0), 2)
-        # cv2.putText(output_img, f"{circle_ratio:.2f}", (int(bcx), int(bcy)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    return rects
 
-        if circle_ratio > min_circle_ratio and circle_ratio > best_ratio:
-            best_ratio = circle_ratio
-            best_circle = bcx, bcy, radius
-        
-
-    # cv2.imshow("Contours, Circles & Ratios", output_img)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    return best_circle, hulls, rotated_rects
 
 
 def draw_connected_components_with_sizes(img, connected_components, one_pixel_size_mm):
@@ -305,16 +374,8 @@ def draw_rotated_rects_with_sizes(img, rotated_rects, one_pixel_size_mm):
 
     return output_img
 
-
-
-
-def main():
-    settings = parse_args()
-    print("Loaded settings:")
-    print(settings)
-
-    reference_size = 0
-    match settings.reference_object:
+def coin_to_diameter(coin: int) -> float:
+    match coin:
         case 50:
             reference_size = 24.25
         case 1:
@@ -322,48 +383,123 @@ def main():
         case 2:
             reference_size = 25.75
 
+    return reference_size
 
-    img = cv2.cvtColor(cv2.imread(settings.image_path), cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(img, (11, 11), 0)
+def extract_circular_roi(image, bcx, bcy, rad):
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.circle(mask, (int(bcx), int(bcy)), int(rad), 255, -1)
+    result = cv2.bitwise_and(image, image, mask=mask)
+    x, y, r = int(bcx), int(bcy), int(rad)
+    cv2.imshow("mask", mask[max(0, y - r):y + r, max(0, x - r):x + r])
+    return result[max(0, y - r):y + r, max(0, x - r):x + r]
+
+
+def iterative_median_filter(image, kernel_size=3, max_iterations=1000):
+    filtered_image = image.copy()
+    for _ in range(max_iterations):
+        # Apply median filter
+        new_image = cv2.medianBlur(filtered_image, kernel_size)
+
+        # Check for convergence
+        if np.array_equal(new_image, filtered_image):
+            break
+
+        filtered_image = new_image
+    return filtered_image
+
+def match_coin_by_template_and_color(cropped_coin_img, template_dir, template_files):
+    best_score = -1
+    best_match = None
+
+    mask_coin = np.any(cropped_coin_img != 0, axis=2).astype(np.uint8) * 255
+    hsv_coin = cv2.cvtColor(cropped_coin_img, cv2.COLOR_BGR2HSV)
+    hist_coin = cv2.calcHist([hsv_coin], [0, 1], mask_coin, [50, 60], [0, 180, 0, 256])
+    cv2.normalize(hist_coin, hist_coin)
+
+    for template_file, value in template_files:
+        template_path = os.path.join(template_dir, template_file)
+        template_img = cv2.imread(template_path)
+        if template_img is None:
+            continue
+
+        template_resized = cv2.resize(template_img, (cropped_coin_img.shape[1], cropped_coin_img.shape[0]))
+        mask_template = np.any(template_resized != 0, axis=2).astype(np.uint8) * 255
+        hsv_template = cv2.cvtColor(template_resized, cv2.COLOR_BGR2HSV)
+        hist_template = cv2.calcHist([hsv_template], [0, 1], mask_template, [50, 60], [0, 180, 0, 256])
+        cv2.normalize(hist_template, hist_template)
+
+        hist_score = cv2.compareHist(hist_coin, hist_template, cv2.HISTCMP_CORREL)
+
+        print(f"Template: {template_file} | Value: {value} | hist_score: {hist_score:.4f}")
+
+        if hist_score > best_score:
+            best_score = hist_score
+            best_match = (template_file, value)
+
+    return best_match, best_score
+
+
+def main():
+    settings = parse_args()
+
+    color_img = cv2.imread(settings.image_path)
+    gray = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (11, 11), 0)
     thresh = cv2.adaptiveThreshold(
     blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-    cv2.THRESH_BINARY_INV, blockSize=11, C=2
-)
+        cv2.THRESH_BINARY_INV, blockSize=11, C=2
+    )
     
-    thresh_otsu = cv2.threshold(
-        img, settings.threshold, 255, cv2.THRESH_BINARY_INV
-    )[1]
-    
-    save_current_pipeline_state(thresh, "./out/binarized gaussian c")
-    save_current_pipeline_state(thresh_otsu, "./out/binarized otsu")
-
     kernel = np.ones((7,7), np.uint8)
+    thresh = iterative_median_filter(thresh, kernel_size=3, max_iterations=100)
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-    save_current_pipeline_state(draw_filtered_boxes(closed), "./out/main_connected_components")
-
     connected_components = filter_boxes_by_containment(closed)
-    cicrle_stats, hulls, _ = detect_circle_with_contours(thresh, connected_components)
-    _, _, rotated_rects = detect_circle_with_contours(closed, connected_components)
-    bcx, bcy, rad = cicrle_stats
-    
-    thresh_rgb = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
-    cv2.circle(thresh_rgb, (int(bcx), int(bcy)), int(rad), (255, 0, 0), 2)
-    save_current_pipeline_state(thresh_rgb.astype("uint8"), "detected_circle_with_contours")
+    best_circle = detect_circle(gray, connected_components)
+    bcx, bcy, rad = best_circle
 
+    rotated_rects = detect_rects(closed, connected_components)
+    # best_circle = detect_hough_circles(thresh, min_radius=20, max_radius=100, min_circle_ratio=0.85)
+    # bcx, bcy, rad, _ = best_circle
     if rad is None:
         log("No circle detected")
         return
-    one_pixel_size = reference_size / (2*rad)
-    log(f"One pixel is {one_pixel_size} mm")
+    
+    extracted_circle = extract_circular_roi(color_img, bcx, bcy, rad)
 
-    # out = draw_connected_components_with_sizes(img, connected_components, one_pixel_size)
-    # for hull in hulls:
-    #     img = draw_convex_hull_with_lengths(img, hull, one_pixel_size)
+    template_dir = "./template"
+    template_files = [
+                ("2_euro.png", 2.0), 
+                ("1_euro.png", 1.0), 
+                ("50_cent.png", 0.5), 
+                ("20_cent.png", 0.2),
+                ("10_cent.png", 0.1), 
+                ("5_cent.png", 0.05), 
+                ("2_cent.png", 0.02), 
+                ("1_cent.png", 0.01)
+                ]
+    
+    best_match, best_score = match_coin_by_template_and_color(extracted_circle, template_dir, template_files)
+    print(f"Best match: {best_match}, Score: {best_score:.2f}")
+    cv2.waitKey(0)
 
-    img = draw_rotated_rects_with_sizes(img, rotated_rects, one_pixel_size)
 
-    save_current_pipeline_state(img.astype("uint8"), "connected_components_with_sizes")
+
+
+    # cv2.imshow("color image", cv2.resize(color_img, (0, 0), fx=0.4, fy=0.4))
+    # cv2.imshow("circle", extracted_circle)
+    # cv2.imshow("binary", cv2.resize(thresh, (0, 0), fx=0.2, fy=0.2))
+    # cv2.imshow("closed", cv2.resize(closed, (0, 0), fx=0.2, fy=0.2))
+    # cv2.waitKey(0)
+    # one_pixel_size = reference_size / (2*rad)
+    # log(f"One pixel is {one_pixel_size} mm")
+
+    # # out = draw_connected_components_with_sizes(img, connected_components, one_pixel_size)
+    # # for hull in hulls:
+    # #     img = draw_convex_hull_with_lengths(img, hull, one_pixel_size)
+
+    # img = draw_rotated_rects_with_sizes(img, rotated_rects, one_pixel_size)
+
+    # save_current_pipeline_state(img.astype("uint8"), "connected_components_with_sizes")
 
 if __name__ == "__main__":
     main()
