@@ -326,9 +326,9 @@ def main():
     img = cv2.cvtColor(cv2.imread(settings.image_path), cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(img, (11, 11), 0)
     thresh = cv2.adaptiveThreshold(
-    blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-    cv2.THRESH_BINARY_INV, blockSize=11, C=2
-)
+            blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, blockSize=11, C=2
+        )
     
     thresh_otsu = cv2.threshold(
         img, settings.threshold, 255, cv2.THRESH_BINARY_INV

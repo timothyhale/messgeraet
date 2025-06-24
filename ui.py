@@ -168,16 +168,97 @@ def filter_boxes_by_containment(binary_image, min_area=500, min_intersection=0.9
     return stats[kept_indices]
 
 
-def draw_filtered_boxes(binary_image, min_area=500, min_intersection=0.9):
-    connected_components = filter_boxes_by_containment(binary_image, min_area, min_intersection)
-    output = cv2.cvtColor(binary_image, cv2.COLOR_GRAY2BGR)
-
+def draw_filtered_boxes(output, connected_components):
     for i in range(len(connected_components)):
         x, y, w, h, _ = connected_components[i]
         cv2.rectangle(output, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.putText(output, f'ID {i}', (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
     return output
+
+def intersection_ratio_contour_in_circle(binary_shape, contour):
+    (cx, cy), radius = cv2.minEnclosingCircle(contour)
+    cx, cy, radius = int(cx), int(cy), int(radius)
+
+    mask_contour = np.zeros(binary_shape, dtype=np.uint8)
+    cv2.drawContours(mask_contour, [contour], -1, 255, thickness=-1)
+
+    mask_circle = np.zeros(binary_shape, dtype=np.uint8)
+    cv2.circle(mask_circle, (cx, cy), radius, 255, thickness=-1)
+
+    intersection_mask = cv2.bitwise_and(mask_contour, mask_circle)
+    intersection_pixels = cv2.countNonZero(intersection_mask)
+    circle_pixels = cv2.countNonZero(mask_circle)
+
+    if circle_pixels == 0:
+        return 0.0
+
+    ratio = intersection_pixels / circle_pixels
+    return ratio
+
+def draw_rotated_rects_with_sizes(output_img, rotated_rects, one_pixel_size_mm):
+    for rect in rotated_rects:
+        (cx, cy), (w, h), angle = rect
+
+        # Real-world dimensions
+        width_mm = w * one_pixel_size_mm
+        height_mm = h * one_pixel_size_mm
+        size_str = f"{width_mm:.2f} x {height_mm:.2f} mm"
+
+        # Get box points and draw the rotated rectangle
+        box = cv2.boxPoints(rect)
+        box = np.intp(box)
+        cv2.drawContours(output_img, [box], 0, (0, 0, 0), 2)
+
+        # Draw size text at the center
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1
+        thickness = 4
+        (text_w, text_h), _ = cv2.getTextSize(size_str, font, font_scale, thickness)
+
+        center_x = int(cx)
+        center_y = int(cy)
+        text_org = (center_x - text_w // 2, center_y + text_h // 2)
+
+        # Background box for better visibility
+        cv2.rectangle(output_img,
+                      (text_org[0] - 2, text_org[1] - text_h - 2),
+                      (text_org[0] + text_w + 2, text_org[1] + 2),
+                      (0, 0, 0), -1)
+
+        cv2.putText(output_img, size_str, text_org, font, font_scale, (255, 255, 255), thickness)
+
+
+def detect_circle_with_contours(binary_image, connected_components, min_circle_ratio=-np.inf):
+    best_circle = None
+    hulls = []
+    rotated_rects = []
+    best_ratio = 0
+    output_img = cv2.cvtColor((binary_image * 255).astype('uint8'), cv2.COLOR_GRAY2BGR)
+
+    for component in connected_components:
+        x, y, w, h, _ = component
+        roi = binary_image[y:y+h, x:x+w]
+        contours, _ = cv2.findContours(roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            continue
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        largest_contour += np.array([[x, y]])
+        hull = cv2.convexHull(largest_contour)
+        hulls.append(hull)
+
+        (bcx, bcy), radius = cv2.minEnclosingCircle(largest_contour)
+        rotated_rects.append(cv2.minAreaRect(largest_contour))
+        circle_ratio = intersection_ratio_contour_in_circle(binary_image.shape, largest_contour)
+
+        if circle_ratio > min_circle_ratio and circle_ratio > best_ratio:
+            best_ratio = circle_ratio
+            best_circle = bcx, bcy, radius
+
+    return best_circle, hulls, rotated_rects
+
 
 
 def convert_to_binary(image, block_size=11, blur_size=11, c=2, invert=False):
@@ -202,6 +283,11 @@ def add_tooltip(imgui, text):
         imgui.text(text)
         imgui.end_tooltip()
 
+def make_odd(num):
+    res = num
+    if num % 2 == 0:
+        res = num + 1
+    return res
 
 def main():
     # 1. Initialize ImGui context
@@ -210,28 +296,28 @@ def main():
     # 2. Initialize GLFW window and renderer
     window = impl_glfw_init()
 
-    try:
-        xscale, yscale = glfw.get_window_content_scale(window)
-    except AttributeError:
-        # Older GLFW: fallback to framebuffer size vs window size
-        fb_w, fb_h = glfw.get_framebuffer_size(window)
-        win_w, win_h = glfw.get_window_size(window)
-        xscale = fb_w / win_w if win_w > 0 else 1.0
-        yscale = fb_h / win_h if win_h > 0 else 1.0
-    # Use xscale for uniform scaling
-    io = imgui.get_io()
-    io.font_global_scale = xscale
-    # Optionally scale style sizes if available
-    style = imgui.get_style()
-    try:
-        style.scale_all_sizes(xscale)
-    except Exception:
-        pass
+    # try:
+    #     xscale, yscale = glfw.get_window_content_scale(window)
+    # except AttributeError:
+    #     # Older GLFW: fallback to framebuffer size vs window size
+    #     fb_w, fb_h = glfw.get_framebuffer_size(window)
+    #     win_w, win_h = glfw.get_window_size(window)
+    #     xscale = fb_w / win_w if win_w > 0 else 1.0
+    #     yscale = fb_h / win_h if win_h > 0 else 1.0
+    # # Use xscale for uniform scaling
+    # io = imgui.get_io()
+    # io.font_global_scale = xscale
+    # # Optionally scale style sizes if available
+    # style = imgui.get_style()
+    # try:
+    #     style.scale_all_sizes(xscale)
+    # except Exception:
+    #     pass
 
     impl = GlfwRenderer(window)
 
     # 3. Load image via OpenCV
-    image_path = "test_image_mid.jpg"
+    image_path = sys.argv[1] 
     img_tex = None
     if not os.path.isfile(image_path):
         print(f"Image file not found: {image_path}")
@@ -248,21 +334,18 @@ def main():
     CONVERT_TO_BINARY = False
     INVERT = False
     CONNECTED_COMP = False
+    MORPHOLOGY = False
+    ADAPTIVE = False
 
     binary_mode = False
     threshold_value = 127
     threshold_block_size = 11
     blur_size = 11
     thresh_constant = 2
+    morph_kernel_size = 7
+    morph_iterations = 1
 
     UpdateImage = False
-
-    #     blur = cv2.GaussianBlur(img, (11, 11), 0)
-    # thresh = cv2.adaptiveThreshold(
-    #         blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-    #         cv2.THRESH_BINARY_INV, blockSize=11, C=2
-    #     )
-    
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -273,6 +356,27 @@ def main():
         # Create a window to display
 
         imgui.begin("Processing Pipeline")
+
+        # ----- Moprhology
+        changed, MORPHOLOGY = imgui.checkbox("Apply Morphology", MORPHOLOGY)
+        UpdateImage = UpdateImage or changed
+
+        changed, morph_kernel_size = imgui.slider_int("kernel size", morph_kernel_size, 3, 65)
+        if changed:
+            UpdateImage = True
+            morph_kernel_size = make_odd(morph_kernel_size)
+
+        add_tooltip(imgui, "Kernel size of morph close filter")
+        UpdateImage = UpdateImage or changed
+
+        changed, morph_iterations = imgui.slider_int("Number of iterations", morph_iterations, 1, 64)
+        UpdateImage = UpdateImage or changed
+        add_tooltip(imgui, "Number of times the morph filter is applied")
+
+
+        imgui.separator()
+
+
         # ----- Binary Conversion
         changed, CONVERT_TO_BINARY = imgui.checkbox("Convert to Binary", CONVERT_TO_BINARY)
         UpdateImage = UpdateImage or changed
@@ -281,23 +385,31 @@ def main():
         changed, INVERT = imgui.checkbox("Invert", INVERT)
         UpdateImage = UpdateImage or changed
 
-        changed, blur_size = imgui.slider_int("GaussianBlur", blur_size, 3, 127)
-        add_tooltip(imgui, "size of gaussion blur kernel")
-        if changed:
-            UpdateImage = True
-            if blur_size % 2 == 0:
-                blur_size = blur_size + 1
-
-        changed, threshold_block_size = imgui.slider_int("AdaptiveThreshBlockSize", threshold_block_size, 3, 127)
-        add_tooltip(imgui, "Size of a pixel neighborhood that is used to calculate a threshold value")
-        if changed:
-            UpdateImage = True
-            if threshold_block_size % 2 == 0:
-                threshold_block_size = threshold_block_size + 1
-
-        changed, thresh_constant = imgui.slider_int("Constant", thresh_constant, 2, 127)
-        add_tooltip(imgui, "Constant subtracted from the mean or weighted mean")
+        imgui.same_line()
+        changed, ADAPTIVE = imgui.checkbox("Adaptive", ADAPTIVE)
         UpdateImage = UpdateImage or changed
+
+        if ADAPTIVE:
+            changed, blur_size = imgui.slider_int("GaussianBlur", blur_size, 3, 127)
+            add_tooltip(imgui, "size of gaussion blur kernel")
+            if changed:
+                UpdateImage = True
+                blur_size = make_odd(blur_size)
+
+            changed, threshold_block_size = imgui.slider_int("AdaptiveThreshBlockSize", threshold_block_size, 3, 127)
+            add_tooltip(imgui, "Size of a pixel neighborhood that is used to calculate a threshold value")
+            if changed:
+                UpdateImage = True
+                threshold_block_size = make_odd(threshold_block_size)
+
+            changed, thresh_constant = imgui.slider_int("Constant", thresh_constant, -127, 127)
+            add_tooltip(imgui, "Constant subtracted from the mean or weighted mean")
+            UpdateImage = UpdateImage or changed
+
+        else: 
+            changed, threshold_value = imgui.slider_int("Threshold", threshold_value, 0, 255)
+            add_tooltip(imgui, "Threshold size")
+            UpdateImage = UpdateImage or changed
 
         imgui.separator()
 
@@ -318,16 +430,41 @@ def main():
         if UpdateImage:
             img_tex.reset()
             img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_RGB2GRAY)
+
+            if MORPHOLOGY:
+                kernel = np.ones((morph_kernel_size,morph_kernel_size), np.uint8)
+                img_tex.current_data = cv2.morphologyEx(img_tex.current_data, cv2.MORPH_CLOSE, kernel, iterations=morph_iterations)
+
             if CONVERT_TO_BINARY:
-                convert_to_binary(img_tex, block_size=threshold_block_size, blur_size=blur_size, c=thresh_constant, invert=INVERT)
+                if ADAPTIVE:
+                    convert_to_binary(img_tex, block_size=threshold_block_size, blur_size=blur_size, c=thresh_constant, invert=INVERT)
+                else:
+                    operation = cv2.THRESH_BINARY_INV if INVERT else cv2.THRESH_BINARY
+                    _, img_tex.current_data = cv2.threshold(img_tex.current_data, threshold_value, 255, operation)
+
             if CONNECTED_COMP:
-                kernel = np.ones((7,7), np.uint8)
-                closed = cv2.morphologyEx(img_tex.current_data, cv2.MORPH_CLOSE, kernel)
-                img_tex.current_data = draw_filtered_boxes(closed)
-                img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_BGR2GRAY)
+                connected_components = filter_boxes_by_containment(img_tex.current_data)
+
+                cicrle_stats, hulls, rotated_rects = detect_circle_with_contours(img_tex.current_data, connected_components)
+
+                img_tex.current_data = draw_filtered_boxes(img_tex.current_data, connected_components)
+
+                # _, _, rotated_rects = detect_circle_with_contours(closed, connected_components)
+                if cicrle_stats is not None:
+                    bcx, bcy, rad = cicrle_stats                
+                    one_pixel_size = 1
+                    if rad is not None and rad != 0:
+                        one_pixel_size = 25.75 / (2*rad)
+
+                    #thresh_rgb = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
+                    draw_rotated_rects_with_sizes(img_tex.current_data, rotated_rects, one_pixel_size)
+                    img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
+                    cv2.circle(img_tex.current_data, (int(bcx), int(bcy)), int(rad), (255, 0, 0), 2)
+
+            if not CONNECTED_COMP:
+                img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
 
 
-            img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
             img_tex.update_texture()
 
             UpdateImage = False
