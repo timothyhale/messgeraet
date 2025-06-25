@@ -885,26 +885,24 @@ def main():
     color_img = cv2.imread(settings.image_path)
     gray = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
     cv2.imwrite("./praesentation/gray.png", gray)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    cv2.imwrite("./praesentation/blur.png", blur)
+    kernel = np.ones((7,7), np.uint8)
+    closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    cv2.imwrite("./praesentation/closed.png", closed)
     thresh = cv2.adaptiveThreshold(
-    blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+    closed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, blockSize=25, C=2
     )
-    custom_gaussian_thresh = custom_adaptive_gaussian_threshold(blur, block_size=25, C=2)
+    custom_gaussian_thresh = custom_adaptive_gaussian_threshold(closed, block_size=25, C=2)
     cv2.imwrite("./praesentation/gaussia_c_thresh.png", custom_gaussian_thresh)
     cv2.imwrite("./praesentation/custom_gaussian_thresh.png", thresh)
     otsu_thrseh = cv2.threshold(
-        blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        closed, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
     )[1]
     cv2.imwrite("./praesentation/otsu_thresh.png", otsu_thrseh)
-    canny_thresh = preprocess_canny(blur, lower=0, upper=0)
+    canny_thresh = preprocess_canny(closed, lower=0, upper=0)
     cv2.imwrite("./praesentation/canny_thresh.png", canny_thresh)
-    kernel = np.ones((7,7), np.uint8)
     thresh = iterative_median_filter(thresh, kernel_size=3, max_iterations=100)
     cv2.imwrite("./praesentation/thresh_median.png", thresh)
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    cv2.imwrite("./praesentation/closed.png", closed)
 
     # Detect Circle, Detect Components
     connected_components = filter_boxes_by_containment(closed)
@@ -932,7 +930,7 @@ def main():
         },
         "gold": {
             "10_cent.png": 0.1,
-            "20_cent.png": 0.2,
+            # "20_cent.png": 0.2,
             "50_cent.png": 0.5,
             "1_euro.png": 1.0,
             "2_euro.png": 2.0
