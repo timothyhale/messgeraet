@@ -296,23 +296,23 @@ def main():
     # 2. Initialize GLFW window and renderer
     window = impl_glfw_init()
 
-    # try:
-    #     xscale, yscale = glfw.get_window_content_scale(window)
-    # except AttributeError:
-    #     # Older GLFW: fallback to framebuffer size vs window size
-    #     fb_w, fb_h = glfw.get_framebuffer_size(window)
-    #     win_w, win_h = glfw.get_window_size(window)
-    #     xscale = fb_w / win_w if win_w > 0 else 1.0
-    #     yscale = fb_h / win_h if win_h > 0 else 1.0
-    # # Use xscale for uniform scaling
-    # io = imgui.get_io()
-    # io.font_global_scale = xscale
-    # # Optionally scale style sizes if available
-    # style = imgui.get_style()
-    # try:
-    #     style.scale_all_sizes(xscale)
-    # except Exception:
-    #     pass
+    try:
+        xscale, yscale = glfw.get_window_content_scale(window)
+    except AttributeError:
+        # Older GLFW: fallback to framebuffer size vs window size
+        fb_w, fb_h = glfw.get_framebuffer_size(window)
+        win_w, win_h = glfw.get_window_size(window)
+        xscale = fb_w / win_w if win_w > 0 else 1.0
+        yscale = fb_h / win_h if win_h > 0 else 1.0
+    # Use xscale for uniform scaling
+    io = imgui.get_io()
+    io.font_global_scale = xscale
+    # Optionally scale style sizes if available
+    style = imgui.get_style()
+    try:
+        style.scale_all_sizes(xscale)
+    except Exception:
+        pass
 
     impl = GlfwRenderer(window)
 
@@ -420,7 +420,11 @@ def main():
         imgui.separator()
 
         if imgui.button("Reset"):
-            CONVERT_TO_BINARY = False            
+            CONVERT_TO_BINARY = False
+            INVERT = False
+            CONNECTED_COMP = False
+            MORPHOLOGY = False
+            ADAPTIVE = False
             UpdateImage = True
 
         imgui.end()
@@ -447,9 +451,7 @@ def main():
 
                 cicrle_stats, hulls, rotated_rects = detect_circle_with_contours(img_tex.current_data, connected_components)
 
-                img_tex.current_data = draw_filtered_boxes(img_tex.current_data, connected_components)
 
-                # _, _, rotated_rects = detect_circle_with_contours(closed, connected_components)
                 if cicrle_stats is not None:
                     bcx, bcy, rad = cicrle_stats                
                     one_pixel_size = 1
@@ -460,6 +462,8 @@ def main():
                     draw_rotated_rects_with_sizes(img_tex.current_data, rotated_rects, one_pixel_size)
                     img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
                     cv2.circle(img_tex.current_data, (int(bcx), int(bcy)), int(rad), (255, 0, 0), 2)
+                    
+                img_tex.current_data = draw_filtered_boxes(img_tex.current_data, connected_components)
 
             if not CONNECTED_COMP:
                 img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
