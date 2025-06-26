@@ -7,6 +7,8 @@ from skimage import io, draw, feature, transform
 from skimage.util import img_as_ubyte
 from dataclasses import dataclass
 from scipy.ndimage import gaussian_filter
+from sklearn.metrics.pairwise import cosine_similarity
+
 
 @dataclass
 class Settings:
@@ -56,7 +58,19 @@ def parse_args() -> Settings:
         output_step=args.output_step,
         # reference_object=args.reference_object
     )
+def combined_similarity(v1, v2, alpha=0.8):
+    v1 = np.array(v1).reshape(1, -1)
+    v2 = np.array(v2).reshape(1, -1)
 
+    cos_sim = cosine_similarity(v1, v2)[0][0]
+    l2_dist = np.linalg.norm(v1 - v2)
+
+    # Convert L2 to similarity-like: lower distance → higher score
+    l2_sim = 1 / (1 + l2_dist)
+
+    return alpha * cos_sim + (1 - alpha) * l2_sim    
+    # Höherer Score = besser
+    return alpha * cos_sim - (1 - alpha) * l2_dist
 def save_current_pipeline_state(image, image_name):
     image_ubyte = img_as_ubyte(image)
     io.imsave(f'{image_name}.png', image_ubyte)
@@ -233,7 +247,14 @@ def auto_otsu_threshold(roi):
         # If the largest contour covers most of the area, we assume it's a background
         binary = cv2.bitwise_not(binary)
     return binary
-                                     
+
+def compactness_normalized(contour):
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0:
+        return 0
+    return (4 * np.pi * area) / (perimeter ** 2)
+
 
 def detect_circle(gray, binary, connected_components, min_circle_ratio=-np.inf):
     best_circle = None
@@ -256,51 +277,54 @@ def detect_circle(gray, binary, connected_components, min_circle_ratio=-np.inf):
             continue
 
         largest_contour = max(contours, key=cv2.contourArea)
-        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
-        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
-        approx += np.array([[x, y]])  # Shift contour back to full image coords
-
-        (bcx, bcy), radius = cv2.minEnclosingCircle(approx)
-        circle_ratio = intersection_ratio_contour_in_circle(gray.shape, approx)
+        largest_contour += np.array([[x, y]])  # Shift contour back to full image coords
 
         # Draw circle on ROI
-        roi_center = (int(bcx - x), int(bcy - y))
-        roi_radius = int(radius)
-        cv2.circle(roi_color, roi_center, roi_radius, (0, 255, 0), 2)
-        cv2.imwrite(f"./praesentation/roi_{i}_with_circle.png", roi_color)
-
-        # Optional: draw also on global output_img
-        cv2.circle(output_img, (int(bcx), int(bcy)), int(radius), (0, 255, 0), 20)
-
-        # Track best circle
-        if circle_ratio > min_circle_ratio and circle_ratio > best_ratio:
-            best_ratio = circle_ratio
-            best_circle = (bcx, bcy, radius)
-
-    # Save full image with all circles drawn
-    cv2.imwrite("./praesentation/all_circles.png", output_img)
+        compactness = compactness_normalized(largest_contour)
+        print(f"Compactness for component {i}: {compactness}")
+        if compactness > best_ratio:
+            best_ratio = compactness
+            best_circle = largest_contour
 
     return best_circle
 
 def detect_rects(binary_image, connected_components, ignore_index=-1):
+    os.makedirs("./praesentation", exist_ok=True)
     rects = []
 
     for i, component in enumerate(connected_components):
         if i == ignore_index:
             continue
+
         x, y, w, h, _ = component
         roi = binary_image[y:y+h, x:x+w]
-        contours, _ = cv2.findContours(roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        binary_roi = auto_otsu_threshold(roi)
 
+
+
+        contours, _ = cv2.findContours(binary_roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
 
+        # Konturbild vorbereiten
+        contour_img = cv2.cvtColor(binary_roi, cv2.COLOR_GRAY2BGR)
         largest_contour = max(contours, key=cv2.contourArea)
-        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
-        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
-        approx += np.array([[x, y]])
+        cv2.drawContours(contour_img, [largest_contour], -1, (0, 255, 0), 10)
+        cv2.imwrite(f"./praesentation/contour_{i}.png", contour_img)
 
-        rects.append(cv2.minAreaRect(approx))
+        # Min-Area-Rect berechnen
+        # epsilon = 0.005 * cv2.arcLength(largest_contour, True)
+        # approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+        largest_contour += np.array([[x, y]])  # globale Koordinaten
+        rect = cv2.minAreaRect(largest_contour)
+        box = cv2.boxPoints(rect).astype(int)
+        rects.append(rect)
+
+        # Rechteck im ROI visualisieren
+        box_local = box - np.array([x, y])
+        box_img = cv2.cvtColor(binary_roi, cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(box_img, [box_local], 0, (0, 0, 255), 10)
+        cv2.imwrite(f"./praesentation/rect_{i}.png", box_img)
 
     return rects
 
@@ -435,21 +459,20 @@ def coin_to_diameter(coin: int) -> float:
 
     return reference_size
 
-def extract_circular_roi(image, bcx, bcy, rad):
+def extract_roi_with_contour(image, contour):
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, (int(bcx), int(bcy)), int(rad), 255, -1)
-    result = cv2.bitwise_and(image, image, mask=mask)
-    x, y, r = int(bcx), int(bcy), int(rad)
-    return result[max(0, y - r):y + r, max(0, x - r):x + r]
-
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+    x, y, w, h = cv2.boundingRect(contour)
+    roi = image[y:y+h, x:x+w]
+    mask_roi = mask[y:y+h, x:x+w]
+    roi_masked = cv2.bitwise_and(roi, roi, mask=mask_roi)
+    return roi_masked
+    
 
 def iterative_median_filter(image, kernel_size=3, max_iterations=1000):
     filtered_image = image.copy()
     for _ in range(max_iterations):
-        # Apply median filter
         new_image = cv2.medianBlur(filtered_image, kernel_size)
-
-        # Check for convergence
         if np.array_equal(new_image, filtered_image):
             break
 
@@ -566,275 +589,19 @@ def match_templates(cropped_coin_img, restricted_template):
 
     return best_match
 
-def preprocess_sobel_clahe(image):
-    # Step 1: Convert to grayscale if needed
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-
-    # Step 2: Apply CLAHE (adaptive contrast)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # Step 3: Apply Sobel edge enhancement (gradient magnitude)
-    sobelx = cv2.Sobel(enhanced, cv2.CV_64F, 1, 0, ksize=3)
-    sobely = cv2.Sobel(enhanced, cv2.CV_64F, 0, 1, ksize=3)
-    sobel_magnitude = np.sqrt(sobelx**2 + sobely**2)
-    sobel_magnitude = np.uint8(np.clip(sobel_magnitude, 0, 255))
-
-    return sobel_magnitude
-
 
 def preprocess_canny(img, lower=20, upper=150):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     # blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
     # Step 1: Apply Canny edge detection
-    edges = cv2.Canny(gray, 20, 150)
+    edges = cv2.Canny(gray, lower, upper)
 
     # # Step 2: Dilate edges to make them thicker and more tolerant
     # kernel = np.ones((3, 3), np.uint8)  # 2×2 is subtle, 3×3 is stronger
     # dilated_edges = cv2.dilate(edges, kernel, iterations=1)
 
     return edges
-
-
-def match_templates_with_canny(cropped_coin_img, restricted_template):
-    """
-    Matches the cropped coin image against a set of templates with rotation and returns the best match.
-
-    Args:
-        cropped_coin_img (np.ndarray): The cropped coin image to match.
-        restricted_template (dict): A dictionary containing template filenames and their values.
-
-    Returns:
-        tuple: The best matching template name and its value.
-    """
-    best_match = None
-    best_score = -1
-
-    # Convert to grayscale if needed
-    if cropped_coin_img.ndim == 3:
-        cropped_coin_img = cv2.cvtColor(cropped_coin_img, cv2.COLOR_BGR2GRAY)
-
-    # Set rotation angles
-    angle_step_size = 10
-    angle_steps = np.arange(0, 360, angle_step_size)
-
-    for template_name, template_value in restricted_template.items():
-        template_path = os.path.join("./template", template_name)
-        template_img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
-        if template_img is None:
-            continue
-
-        max_vals = []
-        for angle in angle_steps:
-            rotated_template = rotate_image(template_img, angle)
-            template_edges = preprocess_canny(rotated_template)
-
-            # Resize the coin to match rotated template size
-            coin_edges = preprocess_canny(cropped_coin_img)
-            resized_coin_edges = cv2.resize(coin_edges, (template_edges.shape[1], template_edges.shape[0]))
-            result = cv2.matchTemplate(resized_coin_edges, template_edges, cv2.TM_CCOEFF_NORMED)
-            _, local_max_val, _, _ = cv2.minMaxLoc(result)
-            max_vals.append(local_max_val)
-
-        max_val = max(max_vals)
-        print(f"{template_name}: max score across rotations = {max_val:.4f}")
-
-        if max_val > best_score:
-            best_score = max_val
-            best_match = (template_name, template_value)
-
-    return best_match
-
-
-def match_templates_with_sobel_clahe(cropped_coin_img, restricted_template):
-    """
-    Matches the cropped coin image against a set of templates with rotation and returns the best match.
-
-    Args:
-        cropped_coin_img (np.ndarray): The cropped coin image to match.
-        restricted_template (dict): A dictionary containing template filenames and their values.
-
-    Returns:
-        tuple: The best matching template name and its value.
-    """
-    best_match = None
-    best_score = -1
-
-    # Convert to grayscale if needed
-    if cropped_coin_img.ndim == 3:
-        cropped_coin_img = cv2.cvtColor(cropped_coin_img, cv2.COLOR_BGR2GRAY)
-
-    # Set rotation angles
-    angle_step_size = 10
-    angle_steps = np.arange(0, 360, angle_step_size)
-
-    for template_name, template_value in restricted_template.items():
-        template_path = os.path.join("./template", template_name)
-        template_img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
-        if template_img is None:
-            continue
-
-        max_vals = []
-        for angle in angle_steps:
-            rotated_template = rotate_image(template_img, angle)
-            template_edges = preprocess_sobel_clahe(rotated_template)
-
-            # Resize the coin to match rotated template size
-            coin_edges = preprocess_sobel_clahe(cropped_coin_img)
-            resized_coin_edges = cv2.resize(coin_edges, (template_edges.shape[1], template_edges.shape[0]))
-            result = cv2.matchTemplate(resized_coin_edges, template_edges, cv2.TM_CCOEFF_NORMED)
-            _, local_max_val, _, _ = cv2.minMaxLoc(result)
-            max_vals.append(local_max_val)
-
-        max_val = max(max_vals)
-        print(f"{template_name}: max score across rotations = {max_val:.4f}")
-
-        if max_val > best_score:
-            best_score = max_val
-            best_match = (template_name, template_value)
-
-    return best_match
-
-
-
-def match_templates_orb(cropped_coin_img, template_dir, restricted_template, nfeatures=1000):
-    orb = cv2.ORB_create(nfeatures=nfeatures)
-    kp1, des1 = orb.detectAndCompute(cropped_coin_img, None)
-
-    best_match = None
-    best_score = -1
-
-    for template_name, template_value in restricted_template.items():
-        template_path = os.path.join(template_dir, template_name)
-        template_img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
-        if template_img is None:
-            continue
-
-        kp2, des2 = orb.detectAndCompute(template_img, None)
-        if des1 is None or des2 is None:
-            continue
-
-        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = matcher.match(des1, des2)
-
-        num_matches = len(matches)
-        print(f"{template_name}: {num_matches} matches")
-
-        if num_matches > best_score:
-            best_score = num_matches
-            best_match = (template_name, template_value)
-
-    return best_match
-
-def preprocess_clahe(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    return enhanced
-
-def match_templates_orb_clahe(cropped_coin_img, restricted_template, template_dir="./template"):
-    """
-    Uses ORB feature matching on CLAHE-preprocessed images to find the best template match.
-
-    Args:
-        cropped_coin_img (np.ndarray): The cropped coin image.
-        restricted_template (dict): Dict with template filenames as keys and coin values as values.
-        template_dir (str): Directory where template images are stored.
-
-    Returns:
-        tuple: (template filename, coin value) with the highest match score
-    """
-    orb = cv2.ORB_create(nfeatures=1000)
-    coin_processed = preprocess_clahe(cropped_coin_img)
-    kp1, des1 = orb.detectAndCompute(coin_processed, None)
-
-    best_match = None
-    best_score = -1
-
-    for template_name, template_value in restricted_template.items():
-        template_path = os.path.join(template_dir, template_name)
-        template_img = cv2.imread(template_path)
-        if template_img is None:
-            continue
-
-        template_processed = preprocess_clahe(template_img)
-        kp2, des2 = orb.detectAndCompute(template_processed, None)
-
-        if des1 is None or des2 is None:
-            continue
-
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(des1, des2)
-        num_matches = len(matches)
-
-        print(f"{template_name}: {num_matches} ORB matches")
-
-        if num_matches > best_score:
-            best_score = num_matches
-            best_match = (template_name, template_value)
-
-    return best_match
-
-
-def draw_internal_contours(canny_img):
-    # Step 1: Find contours with hierarchy
-    contours, hierarchy = cv2.findContours(canny_img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None:
-        return cv2.cvtColor(canny_img, cv2.COLOR_GRAY2BGR)  # No contours found
-
-    # Step 2: Filter internal contours (those with a parent)
-    internal_contours = [contours[i] for i, h in enumerate(hierarchy[0]) if h[3] != -1]
-
-    # Step 3: Convert to BGR for colored drawing
-    output_bgr = cv2.cvtColor(canny_img, cv2.COLOR_GRAY2BGR)
-
-    # Step 4: Draw internal contours in green (or blue, or random color)
-    cv2.drawContours(output_bgr, internal_contours, -1, (0, 255, 0), 1)
-
-    return output_bgr
-
-def extract_digit_2(canny_img):
-    contours, hierarchy = cv2.findContours(canny_img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None:
-        return None
-
-    internal_contours = [contours[i] for i, h in enumerate(hierarchy[0]) if h[3] != -1]
-
-    best_candidate = None
-    best_score = 0
-    image_h, image_w = canny_img.shape
-
-    for cnt in internal_contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = cv2.contourArea(cnt)
-        aspect_ratio = w / h if h > 0 else 0
-
-        # Heuristic filtering
-        if area < 100 or area > 3000:
-            continue
-        if aspect_ratio < 0.3 or aspect_ratio > 1.2:
-            continue
-        if y > image_h // 2:
-            continue  # ignore stuff too far down
-
-        # score = area * closeness to left side
-        score = area * (1 - x / image_w)
-
-        if score > best_score:
-            best_score = score
-            best_candidate = cnt
-
-    if best_candidate is not None:
-        mask = np.zeros_like(canny_img)
-        cv2.drawContours(mask, [best_candidate], -1, 255, thickness=cv2.FILLED)
-
-        x, y, w, h = cv2.boundingRect(best_candidate)
-        digit_crop = mask[y:y+h, x:x+w]
-        return digit_crop
-
-    return None
-
 
 def draw_rotated_rects(img, rotated_rects, color=(0, 255, 0), thickness=2):
     for rect in rotated_rects:
@@ -847,34 +614,167 @@ def draw_rotated_rects(img, rotated_rects, color=(0, 255, 0), thickness=2):
     return img
 
 
-def custom_adaptive_gaussian_threshold(gray_img, block_size=15, C=5):
-    """
-    Implementiert adaptive Thresholding mit Gauß-Gewichtung.
-    gray_img: Graustufenbild (numpy array)
-    block_size: ungerade Zahl, Größe des lokalen Bereichs
-    C: Konstante, die vom Mittelwert abgezogen wird
-    """
-    assert block_size % 2 == 1, "block_size muss ungerade sein"
+def containment_ratio(rectA, rectB):
+    x1, y1, w1, h1 = rectA
+    x2, y2, w2, h2 = rectB
 
-    # Gauß-geglätteter Mittelwert im Nachbarschaftsfenster
-    blurred = gaussian_filter(gray_img.astype(np.float32), sigma=block_size / 6.0)
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
 
-    # Lokale Schwelle = geglätteter Wert - C
-    thresh_img = np.where(gray_img > blurred - C, 255, 0).astype(np.uint8)
-    return thresh_img
+    if xi1 >= xi2 or yi1 >= yi2:
+        return 0.0
 
+    intersection_area = (xi2 - xi1) * (yi2 - yi1)
+    areaA = w1 * h1
 
-def adaptive_gaussian_threshold_with_border(gray_img, block_size=15, C=5):
-    blurred = cv2.GaussianBlur(
-        gray_img,
-        (block_size, block_size),
-        sigmaX=0,
-        borderType=cv2.BORDER_REPLICATE
+    return intersection_area / areaA
+
+def filter_connected_components(components, thr=0.9):
+    filtered = []
+
+    for i, component in enumerate(components):
+        x, y, w, h, _ = component
+        rectA = (x, y, w, h)
+
+        for j, other_component in enumerate(components):
+            if i == j:
+                continue
+            ox, oy, ow, oh, _ = other_component
+            rectB = (ox, oy, ow, oh)
+
+            if containment_ratio(rectA, rectB) > thr:
+                break
+        else:
+            filtered.append(component)
+
+    return filtered
+
+def detect_circles_with_hough(canny_image, min_radius=80, max_radius=220, center_tolerance=10):
+    h, w = canny_image.shape
+    cx, cy = w // 2, h // 2
+
+    # Graubild aus Canny erzeugen (sicherheitshalber)
+    gray = canny_image.copy()
+
+    # HoughCircle arbeitet trotzdem mit dem "normalen" Graubild, also bleibt das korrekt
+    circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=30,
+        param1=100,
+        param2=30,
+        minRadius=min_radius,
+        maxRadius=max_radius
     )
 
-    threshold = blurred - C
-    binary = np.where(gray_img > threshold, 255, 0).astype(np.uint8)
-    return binary
+    accepted_circles = []
+    if circles is not None:
+        print("Detected circles:", len(circles[0]))  # <== FIXED
+        circles = np.round(circles[0, :]).astype("int")
+        for (x, y, r) in circles:
+            if abs(x - cx) <= center_tolerance and abs(y - cy) <= center_tolerance:
+                accepted_circles.append((x, y, r))
+
+    return accepted_circles
+
+def draw_circles_on_image(image, circles, color=(255, 0, 0), thickness=2):
+    # Sicherstellen, dass das Bild kopiert wird (nicht original überschreiben)
+    image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image
+    output = image.copy()
+
+    for circle in circles:
+        x, y, r = map(int, circle)
+        cv2.circle(output, (x, y), r, color, thickness)
+
+    return output
+
+
+
+def predict_coin(extracted_circle, template_cfg=None):
+    def mean_lab_ab(img_bgr, mask):
+        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2Lab)
+        l, a, b, _ = cv2.mean(lab, mask=mask)
+        return a - 128, b - 128
+
+    def identify_metal_color(a, b):
+        if b >= 28 and b - a > 5:
+            return "gold"
+        elif a >= 13 and b >= 19 and abs(a - b) < 10:
+            return "copper"
+        else:
+            return "unknown"
+        
+    def classify_coin_or_material(a_in, b_in, a_out, b_out):
+        b_diff = b_in - b_out
+        abs_diff = abs(b_diff)
+
+        # print(f"Δb (inner - outer): {b_diff:.2f}")
+
+        # Bimetall (1€ oder 2€)
+        if abs_diff >= 7:
+            if b_diff > 0:
+                return "", 2
+            else:
+                return "", 1
+        
+        a_mean = (a_in + a_out) / 2
+        b_mean = (b_in + b_out) / 2
+
+        # print(f"Mittlerer a/b-Wert: a={a_mean:.1f}, b={b_mean:.1f}")
+
+        metal = identify_metal_color(a_mean, b_mean)
+        return metal, -1
+    
+    def compare_shape_to_twenty_cent(extracted_circle, twenty_cent):
+        binary_circle = cv2.cvtColor(extracted_circle, cv2.COLOR_BGR2GRAY)
+        binary_circle = cv2.threshold(binary_circle, 1, 255, cv2.THRESH_BINARY)[1]
+
+        twenty_cent_gray = cv2.cvtColor(twenty_cent, cv2.COLOR_BGR2GRAY)
+        twenty_cent_binary = cv2.threshold(twenty_cent_gray, 1, 255, cv2.THRESH_BINARY)[1]
+
+        twenty_cent_resized = cv2.resize(twenty_cent_binary, (binary_circle.shape[1], binary_circle.shape[0]))
+
+
+
+    
+    assert extracted_circle.shape[2] == 3, "The extracted circle must be a color image with 3 channels."
+    assert extracted_circle.shape[:2] == (400, 400), "The extracted circle must be 400x400 pixels."
+
+
+    h, w = extracted_circle.shape[:2]
+    center = (w // 2, h // 2)
+    inner_r = 144
+    outer_r = 200
+
+    # Masks
+    inner_mask = np.zeros((h, w), dtype=np.uint8)
+    outer_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(inner_mask, center, inner_r, 255, thickness=cv2.FILLED)
+    cv2.circle(outer_mask, center, outer_r, 255, thickness=cv2.FILLED)
+    outer_mask = cv2.subtract(outer_mask, inner_mask)
+
+    # Mean Lab values
+    a_in, b_in = mean_lab_ab(extracted_circle, inner_mask)
+    a_out, b_out = mean_lab_ab(extracted_circle, outer_mask)
+
+    # Debug output
+    # print(f"Inner a/b: {a_in:.1f} / {b_in:.1f}")
+    # print(f"Outer a/b: {a_out:.1f} / {b_out:.1f}")
+
+    # Classification
+    metal, coin = classify_coin_or_material(a_in, b_in, a_out, b_out)
+    if metal == "":
+        return coin
+    
+    if metal == "gold":
+        return
+
+
+def read_and_resize_image(image_path, size=(400, 400), type=cv2.IMREAD_COLOR_BGR):
+    return cv2.resize(cv2.imread(image_path, type), dsize=size, interpolation=cv2.INTER_LANCZOS4)
 
 
 
@@ -885,16 +785,24 @@ def main():
     color_img = cv2.imread(settings.image_path)
     gray = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
     cv2.imwrite("./praesentation/gray.png", gray)
-    kernel = np.ones((7,7), np.uint8)
-    closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    
+    kernel = np.ones((3,3), np.uint8)
+    morph_iterations = 1
+    closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel, iterations=morph_iterations)
     cv2.imwrite("./praesentation/closed.png", closed)
+
+    # cv2.imshow("closed", closed)
+    
     thresh = cv2.adaptiveThreshold(
     closed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, blockSize=25, C=2
+        cv2.THRESH_BINARY_INV, blockSize=31, C=2
     )
-    custom_gaussian_thresh = custom_adaptive_gaussian_threshold(closed, block_size=25, C=2)
-    cv2.imwrite("./praesentation/gaussia_c_thresh.png", custom_gaussian_thresh)
-    cv2.imwrite("./praesentation/custom_gaussian_thresh.png", thresh)
+
+    # cv2.imshow("thresh", thresh)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+    cv2.imwrite("./praesentation/gaussian_c_thresh.png", thresh)
+
     otsu_thrseh = cv2.threshold(
         closed, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
     )[1]
@@ -905,21 +813,22 @@ def main():
     cv2.imwrite("./praesentation/thresh_median.png", thresh)
 
     # Detect Circle, Detect Components
-    connected_components = filter_boxes_by_containment(closed)
+    connected_components = filter_boxes_by_containment(thresh)
     cv2.imwrite("./praesentation/ccl.png", draw_connected_components(thresh, connected_components=connected_components, thickness=20))
-    best_circle = detect_circle(gray, thresh, connected_components)
-    bcx, bcy, rad = best_circle
+    filtered_components = filter_connected_components(connected_components)
+    cv2.imwrite("./praesentation/filtered_ccl.png", draw_connected_components(thresh, connected_components=filtered_components, thickness=20))
+    best_circle = detect_circle(gray, thresh, filtered_components)
 
-    rotated_rects = detect_rects(closed, connected_components)
+    rotated_rects = detect_rects(closed, filtered_components)
     # best_circle = detect_hough_circles(thresh, min_radius=20, max_radius=100, min_circle_ratio=0.85)
     # bcx, bcy, rad, _ = best_circle
-    if rad is None:
-        log("No circle detected")
-        return
+    # if rad is None:
+    #     log("No circle detected")
+    #     return
     
-    extracted_circle = extract_circular_roi(color_img, bcx, bcy, rad)
+    extracted_circle = extract_roi_with_contour(color_img, best_circle)
     # cv2.imshow("coin", extracted_circle)
-    # cv2.imwrite("./praesentation/ccl.png", draw_rotated_rects(color_img, rotated_rects, thickness=20))
+    cv2.imwrite("./praesentation/rotated_rects.png", draw_rotated_rects(color_img, rotated_rects, thickness=20))
     # cv2.waitKey(0)
     template_cfg = {
         "dir": "./template",
@@ -939,9 +848,9 @@ def main():
 
     
     # # Münzenerkennung
-    hist_map = match_coin_by_hist(extracted_circle, template_cfg)
-    best_group = max(hist_map.items(), key=lambda item: sum(item[1].values()) / len(item[1]))[0]
-    print(best_group)
+    # hist_map = match_coin_by_hist(extracted_circle, template_cfg)
+    # best_group = max(hist_map.items(), key=lambda item: sum(item[1].values()) / len(item[1]))[0]
+    # print(best_group)
     # restricted_map = template_cfg[best_group]
     # print("Hallo", restricted_map)
 
@@ -950,26 +859,44 @@ def main():
 
     # cv2.imshow("canny internal contours", extract_digit_2(canny_coin))
 
-    
+    # best_match, best_score = match_coin_by_texture(extracted_circle, template_cfg)
+    # print("Best match by texture:", best_match, "with score:", best_score)
 
     # sobel_clahe = preprocess_sobel_clahe(extracted_circle)
     # cv2.imshow("sobel clahe", sobel_clahe)
-    # cv2.imshow("normal canny", preprocess_canny(extracted_circle))
-    # cv2.imshow("coin", extracted_circle)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-    # print("cannyg")
-    # matched_value = match_templates_with_canny(extracted_circle, template_cfg["copper"])
-    # matched_value = match_templates_with_canny(extracted_circle, template_cfg["gold"])
-    # print("Nothing")
-    # matched_value = match_templates(extracted_circle, template_cfg["copper"])
-    # matched_value = match_templates(extracted_circle, template_cfg["gold"])
-    # print("Soble clahe")
-    # matched_value = match_templates_with_sobel_clahe(extracted_circle, template_cfg["copper"])
-    # matched_value = match_templates_with_sobel_clahe(extracted_circle, template_cfg["gold"])
-    # # # print(matched_value)
-    # print("ORB And clahe")
-    # matched_value = match_templates_orb_clahe(extracted_circle, template_cfg["copper"])
-    # matched_value = match_templates_orb_clahe(extracted_circle, template_cfg["gold"])
+    cv2.imshow("coin", extracted_circle)
+    print("Shape", extracted_circle.shape)
+    cv2.imshow("normal canny", preprocess_canny(extracted_circle, lower=0, upper=200))
+    resized_extraced_circle = cv2.resize(extracted_circle, (400, 400), interpolation=cv2.INTER_LANCZOS4)
+    cv2.imshow("resized extracted circle", resized_extraced_circle)
+    canny_circle = preprocess_canny(resized_extraced_circle, lower=40, upper=200)
+    cv2.imshow("resized extracted circle", canny_circle)
+
+#    circles = detect_circles_with_hough(canny_circle, min_radius=0, max_radius=220, center_tolerance=100)
+
+    circles = [(200, 200, 144), (200, 200, 200)]
+    out = draw_circles_on_image(resized_extraced_circle, circles, color=(0, 255, 0), thickness=2)
+    # template_1 = cv2.resize(cv2.imread("./template/1_euro.png", cv2.IMREAD_COLOR_BGR), (400, 400), interpolation=cv2.INTER_LANCZOS4)
+    # cv2.imshow("template 1 euro", draw_circles_on_image(template_1, circles, color=(0, 255, 0), thickness=2))
+    cv2.imshow("Detected Circle", out)
+    cv2.imshow("Detected Circle", resized_extraced_circle)
+
+    predict_coin(resized_extraced_circle, template_cfg)
+    predict_coin(read_and_resize_image("./template/1_euro.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/2_euro.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/1_cent.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/2_cent.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/5_cent.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/10_cent.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/20_cent.png"), template_cfg)
+    predict_coin(read_and_resize_image("./template/50_cent.png"), template_cfg)
+
+
+
+    3
+    # get_center_circles(canny_circle)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
 if __name__ == "__main__":
     main()
