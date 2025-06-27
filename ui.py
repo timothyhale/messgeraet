@@ -488,9 +488,10 @@ def main():
                             one_pixel_size = 25.75 / (2*rad)
 
                 img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
-                if found_objects_ref_index != -1:
+                if found_objects_ref_index != -1 and len(connected_components) > 0:
                     x,y, radius, _, _ = circle_from_component(img_tex.current_data, connected_components[found_objects_ref_index])
-                    cv2.circle(img_tex.current_data, (int(x), int(y)), int(radius), (255, 0, 0), 2)
+                    one_pixel_size = ref_object_size / (2*radius)
+                    cv2.circle(img_tex.current_data, (int(x), int(y)), int(radius), (255, 0, 0), 3)
 
 
 
@@ -516,8 +517,6 @@ def main():
         for idx, obj in enumerate(found_objects):
             if imgui.button("ID{}".format(idx)):
                 found_objects_ref_index = idx
-                x,y, radius, _, _ = circle_from_component(img_tex.current_data, obj)
-                one_pixel_size = ref_object_size / (2*radius)
                 UpdateImage = True
 
             if idx == found_objects_ref_index:
@@ -528,9 +527,6 @@ def main():
                 if changed:
                     try:
                         ref_object_size = float(text_val)
-                        x,y, radius, _,_ = circle_from_component(img_tex.current_data, obj)
-                        #cv2.circle(img_tex.current_data, (int(x), int(y)), int(radius), (255, 0, 0), 2)
-                        one_pixel_size = ref_object_size / (2*radius)
                         UpdateImage = True
                     except ValueError:
                         pass
@@ -538,7 +534,8 @@ def main():
 
             else:
                 imgui.same_line()
-                x,y, radius, width, height = circle_from_component(img_tex.current_data, obj)
+                x,y,width,height, _ = obj
+                #x,y, radius, width, height = circle_from_component(img_tex.current_data, obj)
                 imgui.text("{:.2f}mm X {:.2f}mm".format(width * one_pixel_size, height * one_pixel_size))
 
         imgui.end()
