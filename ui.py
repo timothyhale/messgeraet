@@ -169,8 +169,8 @@ def filter_boxes_by_containment(binary_image, min_area=500, min_intersection=0.9
 
 
 def draw_filtered_boxes(output, connected_components):
-    for i in range(len(connected_components)):
-        x, y, w, h, _ = connected_components[i]
+    for i, comp in enumerate(connected_components):
+        x, y, w, h, _ = comp
         cv2.rectangle(output, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.putText(output, f'ID {i}', (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
@@ -228,6 +228,22 @@ def draw_rotated_rects_with_sizes(output_img, rotated_rects, one_pixel_size_mm):
 
         cv2.putText(output_img, size_str, text_org, font, font_scale, (255, 255, 255), thickness)
 
+def circle_from_component(binary_image, component):
+    x, y, w, h, _ = component
+    binary_image = cv2.cvtColor(binary_image, cv2.COLOR_RGB2GRAY)
+    roi = binary_image[y:y+h, x:x+w]
+    contours, _ = cv2.findContours(roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return 0,0,0
+
+    largest_contour = max(contours, key=cv2.contourArea)
+    largest_contour += np.array([[x, y]])
+
+    (bcx, bcy), radius = cv2.minEnclosingCircle(largest_contour)
+    _, (width, height), _ = cv2.minAreaRect(largest_contour)
+    return bcx, bcy, radius, width, height
+
 
 def detect_circle_with_contours(binary_image, connected_components, min_circle_ratio=-np.inf):
     best_circle = None
@@ -236,7 +252,9 @@ def detect_circle_with_contours(binary_image, connected_components, min_circle_r
     best_ratio = 0
     output_img = cv2.cvtColor((binary_image * 255).astype('uint8'), cv2.COLOR_GRAY2BGR)
 
-    for component in connected_components:
+    index_of_detected_circle = 0
+
+    for idx, component in enumerate(connected_components):
         x, y, w, h, _ = component
         roi = binary_image[y:y+h, x:x+w]
         contours, _ = cv2.findContours(roi.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -256,8 +274,10 @@ def detect_circle_with_contours(binary_image, connected_components, min_circle_r
         if circle_ratio > min_circle_ratio and circle_ratio > best_ratio:
             best_ratio = circle_ratio
             best_circle = bcx, bcy, radius
+            index_of_detected_circle = idx
 
-    return best_circle, hulls, rotated_rects
+    return best_circle, hulls, rotated_rects, index_of_detected_circle
+
 
 
 
@@ -345,6 +365,12 @@ def main():
     morph_kernel_size = 7
     morph_iterations = 1
 
+    found_objects = []
+    found_objects_ref_index = -1
+
+    ref_object_size = 25.75
+    one_pixel_size = 1
+
     UpdateImage = False
 
     while not glfw.window_should_close(window):
@@ -429,9 +455,10 @@ def main():
 
         imgui.end()
 
-        imgui.begin("Image Processor")
 
         if UpdateImage:
+            found_objects = []
+            found_objects_ref_index = -1
             img_tex.reset()
             img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_RGB2GRAY)
 
@@ -448,8 +475,12 @@ def main():
 
             if CONNECTED_COMP:
                 connected_components = filter_boxes_by_containment(img_tex.current_data)
+                found_objects = connected_components
+                cicrle_stats, hulls, rotated_rects, idx = detect_circle_with_contours(img_tex.current_data, connected_components)
+                if idx < len(connected_components) and idx >= 0:
+                    found_objects_ref_index = idx
 
-                cicrle_stats, hulls, rotated_rects = detect_circle_with_contours(img_tex.current_data, connected_components)
+                img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
 
 
                 if cicrle_stats is not None:
@@ -460,7 +491,6 @@ def main():
 
                     #thresh_rgb = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
                     draw_rotated_rects_with_sizes(img_tex.current_data, rotated_rects, one_pixel_size)
-                    img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
                     cv2.circle(img_tex.current_data, (int(bcx), int(bcy)), int(rad), (255, 0, 0), 2)
                     
                 img_tex.current_data = draw_filtered_boxes(img_tex.current_data, connected_components)
@@ -472,6 +502,37 @@ def main():
             img_tex.update_texture()
 
             UpdateImage = False
+
+        imgui.begin("Object Detections")
+
+        for idx, obj in enumerate(found_objects):
+            if imgui.button("ID{}".format(idx)):
+                found_objects_ref_index = idx
+                x,y, radius, _, _ = circle_from_component(img_tex.current_data, obj)
+                one_pixel_size = ref_object_size / (2*radius)
+
+            if idx == found_objects_ref_index:
+                imgui.same_line()
+                imgui.text("Ref Object Diameter:")
+                imgui.same_line()
+                changed, text_val = imgui.input_text("", "{}mm".format(ref_object_size), 8)
+                if changed:
+                    try:
+                        ref_object_size = float(text_val)
+                        x,y, radius, _,_ = circle_from_component(img_tex.current_data, obj)
+                        one_pixel_size = ref_object_size / (2*radius)
+                    except ValueError:
+                        pass
+            else:
+                imgui.same_line()
+                x,y, radius, width, height = circle_from_component(img_tex.current_data, obj)
+                imgui.text("{:.2f}mm X {:.2f}mm".format(width * one_pixel_size, height * one_pixel_size))
+
+        imgui.end()
+
+
+        imgui.begin("Image Processor")
+
         #imgui.text("Hello, world! Below is the loaded image (if any).")
 
         if img_tex is not None and img_tex.texture_id is not None:   
