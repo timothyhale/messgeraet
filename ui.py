@@ -458,7 +458,6 @@ def main():
 
         if UpdateImage:
             found_objects = []
-            found_objects_ref_index = -1
             img_tex.reset()
             img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_RGB2GRAY)
 
@@ -476,22 +475,28 @@ def main():
             if CONNECTED_COMP:
                 connected_components = filter_boxes_by_containment(img_tex.current_data)
                 found_objects = connected_components
-                cicrle_stats, hulls, rotated_rects, idx = detect_circle_with_contours(img_tex.current_data, connected_components)
-                if idx < len(connected_components) and idx >= 0:
-                    found_objects_ref_index = idx
+
+                if found_objects_ref_index == -1 or found_objects_ref_index >= len(found_objects):
+                    cicrle_stats, hulls, rotated_rects, idx = detect_circle_with_contours(img_tex.current_data, connected_components)
+                    if idx < len(connected_components) and idx >= 0:
+                        found_objects_ref_index = idx
+
+                    if cicrle_stats is not None:
+                        bcx, bcy, rad = cicrle_stats                
+                        one_pixel_size = 1
+                        if rad is not None and rad != 0:
+                            one_pixel_size = 25.75 / (2*rad)
 
                 img_tex.current_data = cv2.cvtColor(img_tex.current_data, cv2.COLOR_GRAY2RGB)
+                if found_objects_ref_index != -1:
+                    x,y, radius, _, _ = circle_from_component(img_tex.current_data, connected_components[found_objects_ref_index])
+                    cv2.circle(img_tex.current_data, (int(x), int(y)), int(radius), (255, 0, 0), 2)
 
 
-                if cicrle_stats is not None:
-                    bcx, bcy, rad = cicrle_stats                
-                    one_pixel_size = 1
-                    if rad is not None and rad != 0:
-                        one_pixel_size = 25.75 / (2*rad)
 
                     #thresh_rgb = cv2.cvtColor(closed, cv2.COLOR_GRAY2BGR)
-                    draw_rotated_rects_with_sizes(img_tex.current_data, rotated_rects, one_pixel_size)
-                    cv2.circle(img_tex.current_data, (int(bcx), int(bcy)), int(rad), (255, 0, 0), 2)
+                    #draw_rotated_rects_with_sizes(img_tex.current_data, rotated_rects, one_pixel_size)
+
                     
                 img_tex.current_data = draw_filtered_boxes(img_tex.current_data, connected_components)
 
@@ -501,15 +506,19 @@ def main():
 
             img_tex.update_texture()
 
-            UpdateImage = False
+        UpdateImage = False
 
         imgui.begin("Object Detections")
 
+        x = 0
+        y = 0
+        radius = 0
         for idx, obj in enumerate(found_objects):
             if imgui.button("ID{}".format(idx)):
                 found_objects_ref_index = idx
                 x,y, radius, _, _ = circle_from_component(img_tex.current_data, obj)
                 one_pixel_size = ref_object_size / (2*radius)
+                UpdateImage = True
 
             if idx == found_objects_ref_index:
                 imgui.same_line()
@@ -520,9 +529,13 @@ def main():
                     try:
                         ref_object_size = float(text_val)
                         x,y, radius, _,_ = circle_from_component(img_tex.current_data, obj)
+                        #cv2.circle(img_tex.current_data, (int(x), int(y)), int(radius), (255, 0, 0), 2)
                         one_pixel_size = ref_object_size / (2*radius)
+                        UpdateImage = True
                     except ValueError:
                         pass
+
+
             else:
                 imgui.same_line()
                 x,y, radius, width, height = circle_from_component(img_tex.current_data, obj)
