@@ -405,6 +405,9 @@ def main():
 
         # ----- Binary Conversion
         changed, CONVERT_TO_BINARY = imgui.checkbox("Convert to Binary", CONVERT_TO_BINARY)
+        if changed:
+            found_objects_ref_index = -1
+
         UpdateImage = UpdateImage or changed
 
         imgui.same_line()
@@ -440,7 +443,7 @@ def main():
         imgui.separator()
 
         # ----- 
-        changed, CONNECTED_COMP = imgui.checkbox("Find Connected Components", CONNECTED_COMP)
+        changed, CONNECTED_COMP = imgui.checkbox("Region Detection", CONNECTED_COMP)
         UpdateImage = UpdateImage or changed
 
         imgui.separator()
@@ -454,7 +457,6 @@ def main():
             UpdateImage = True
 
         imgui.end()
-
 
         if UpdateImage:
             found_objects = []
@@ -531,11 +533,10 @@ def main():
                     except ValueError:
                         pass
 
-
             else:
                 imgui.same_line()
-                x,y,width,height, _ = obj
-                #x,y, radius, width, height = circle_from_component(img_tex.current_data, obj)
+                #x,y,width,height, _ = obj
+                x,y, radius, width, height = circle_from_component(img_tex.current_data, obj)
                 imgui.text("{:.2f}mm X {:.2f}mm".format(width * one_pixel_size, height * one_pixel_size))
 
         imgui.end()
